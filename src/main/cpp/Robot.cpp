@@ -926,7 +926,7 @@ void Robot::AutonomousPeriodic()
       {
         double offsetX = limelight->getTargetX();
         double offsetY = limelight->getTargetY();
-        centered = swerveDrive->StrafeToPole2(offsetX, offsetY, HIGHCONEX, -0.07, elapsedTime); 
+        centered = swerveDrive->StrafeToPoleFast(offsetX, offsetY, HIGHCONEX, -0.07, elapsedTime); 
       }
       if ((centered && lifted))
         doneWithPoleAlignment = true;

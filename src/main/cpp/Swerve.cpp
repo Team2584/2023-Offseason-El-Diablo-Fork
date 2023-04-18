@@ -3,22 +3,21 @@
 
 #include <frc/smartdashboard/SmartDashboard.h>
 
-
-// Idea, make the "drive swerve percent" functions just set the "lastX" or "lastY" and have a swerve update function that actually drives the swerve
-// Add warnings if you are setting the swerve speed in any direction twice in one loop
-// Have the update function also update odometry and stuff
-
+/**
+ * A Swerve Drive has 4 Swerve Modules, each of which is defined as an object of the class SwerveModule
+ * In general, this class has functions allowing us to control each swerve module individually.
+ */
 class SwerveModule
 {
 private:
   // Instance Variables for each swerve module
-  ctre::phoenix::motorcontrol::can::TalonFX *driveMotor;
-  rev::CANSparkMax *spinMotor;
-  rev::SparkMaxRelativeEncoder *spinEncoder;
+  ctre::phoenix::motorcontrol::can::TalonFX *driveMotor; /* The motor responsible for actually driving the wheel*/
+  rev::CANSparkMax *spinMotor; /* The motor responsible for "spinning" the wheel left to right to change direction*/
+  rev::SparkMaxRelativeEncoder *spinRelativeEncoder; /* The relative encoder built into the spinMotor */
   double encoderOffset;       /* Offset in magnetic encoder from 0 facing the front of the robot */
   double driveEncoderInitial; /* Used to computer the change in encoder tics, aka motor rotation */
-  double spinEncoderInitialHeading;
-  double spinEncoderInitialValue;
+  double spinEncoderInitialHeading; /* Initial Heading of Relative Spin Encoder used for zeroing*/
+  double spinEncoderInitialValue; /* Initial Value of Relative Spin Encoder used for zeroing*/
   double runningIntegral = 0; /* Running sum of errors for integral in PID */
 
 public:
@@ -39,7 +38,7 @@ public:
     spinMotor = spinMotor_;
     magEncoder = magEncoder_;
     encoderOffset = encoderOffset_;
-    spinEncoder = new rev::SparkMaxRelativeEncoder(spinMotor->GetEncoder());
+    spinRelativeEncoder = new rev::SparkMaxRelativeEncoder(spinMotor->GetEncoder());
     ResetEncoders();
   }
 
@@ -48,7 +47,7 @@ public:
    *
    * @return The Swerve Drive wheel's heading in radians with 0.0 being the front of the robot increasing clockwise.
    */
-  double GetMagEncoderReading()
+  double GetModuleHeading()
   {
     double encoderReading = magEncoder->GetAbsolutePosition();
     // subtract the encoder offset to make 0 degrees forward
@@ -68,7 +67,7 @@ public:
   void ResetEncoders()
   {
     driveEncoderInitial = driveMotor->GetSelectedSensorPosition();
-    spinEncoderInitialHeading = GetMagEncoderReading();
+    spinEncoderInitialHeading = GetModuleHeading(); 
     // spinEncoderInitialValue = -1 * spinMotor->GetSelectedSensorPosition();    likely uneeded code, copied from talon swerve
   }
 
@@ -89,11 +88,13 @@ public:
   }
 
   /**
-   *  INCOMPLETE DO NOT USE UNDER ANY CIRCUMSTANCE, USE GetMagEncoderReading() INSTEAD!   Also this hasn't been updated from the talon swerve drive as it is an uneccessary functino
+   *  INCOMPLETE DO NOT USE UNDER ANY CIRCUMSTANCE, USE GetModuleHeading() INSTEAD!   
+   *  Also this hasn't been updated from the talon swerve drive as it is an uneccessary functino
+   *  This function was intended to use the relative encoder as a backup if the absolute mag encoder broke
    */
   double GetSpinEncoderRadians()
   {
-    return spinEncoder->GetPosition();
+    return spinRelativeEncoder->GetPosition();
   }
 
   /**
@@ -113,7 +114,7 @@ public:
   {
     SwerveModuleState state = SwerveModuleState();
     state.speed = units::meters_per_second_t{fabs(GetDriveVelocity())};
-    state.angle = Rotation2d(units::radian_t{GetMagEncoderReading()});
+    state.angle = Rotation2d(units::radian_t{GetModuleHeading()});
     return state;
   }
 
@@ -124,7 +125,7 @@ public:
   {
     SwerveModulePosition state = SwerveModulePosition();
     state.distance = units::length::centimeter_t{GetDriveEncoderMeters() * 100}; // It works, don't judge
-    state.angle = Rotation2d(units::radian_t{GetMagEncoderReading()});
+    state.angle = Rotation2d(units::radian_t{GetModuleHeading()});
     return state;
   }
 
@@ -134,12 +135,12 @@ public:
    * Ask Avrick for a more detailed explanation of how this function works, it came to him in a dream.
    *
    * @param driveSpeed The desired velocity of the wheel in percent of maximum (0 - 1.0)
-   * @param targetAngle The desired angle of the wheel in Radians
+   * @param targetAngle The desired angle of the wheel in Degrees
    */
   void DriveSwerveModulePercent(double driveSpeed, double targetAngle)
   {
     // current encoder reading as an angle
-    double wheelAngle = GetMagEncoderReading() * 180 / M_PI;
+    double wheelAngle = GetModuleHeading() * 180 / M_PI;
     // amount wheel has left to turn to reach target
     double error = 0;
     // if wheel should spin clockwise(1) or counterclockwise(-1) to reach the target
@@ -243,35 +244,37 @@ public:
    * Drives the Swerve Module at a certaint speed in a certain direction using a simple P feedback loop.
    *
    * @param driveSpeed The desired velocity of the wheel in meters per second
-   * @param targetAngle The desired angle of the wheel in Radians
+   * @param targetAngle The desired angle of the wheel in Degrees
    */
-  void DriveSwerveModuleMeters(double driveSpeed, double targetRadian)
+  void DriveSwerveModuleMeters(double driveSpeed, double targetAngle)
   {
-    DriveSwerveModulePercent(driveSpeed / SWERVE_DRIVE_MAX_MPS, targetRadian);
+    DriveSwerveModulePercent(driveSpeed / SWERVE_DRIVE_MAX_MPS, targetAngle);
   }
 };
 
+
+/**
+ * This class has functions to control all the autonomous and drive control functionality of a swerve drive
+ * 
+ * IMPORTANT: This class uses 3 different types of odometry. Each odometry is tracked separately and is used in different scenarios.
+ * odometry: Basic odometry reading that only uses wheel encoders. As the match continues it slowly drifts and becomes less accurate.
+ * coneOdometry: Returns position on the field in relation to the nearest cone in vision. 
+ * tagOdometry: Returns position on the field in relation to the nearest aprilTag in vision.
+ */
 class SwerveDrive
 {
 private:
-  //Suggestion: The fields are a little inconsistant about including the type before each variable declaration, or declaring a bunch of variables together
   Pigeon2 *pigeonIMU;
-  Translation2d m_frontLeft; /* Location of the front left wheel in relation to the center of the robot */
-  Translation2d m_frontRight;
-  Translation2d m_backLeft;
-  Translation2d m_backRight;
-  SwerveDriveKinematics<4> kinematics;
-  SwerveDriveOdometry<4> *coneOdometry, *tagOdometry;
-  SwerveDriveOdometry<4> *odometry;
-  std::queue<pathplanner::PathPlannerTrajectory> trajectoryList;
-  pathplanner::PathPlannerTrajectory trajectory;
+  Translation2d m_frontLeft, m_frontRight, m_backLeft, m_backRight; /* Location of each wheel in relation to the center of the robot */
+  SwerveDriveKinematics<4> kinematics; /* A WPI struct which contains all wheels of a swerve drive*/
+  SwerveDriveOdometry<4> *odometry, *coneOdometry, *tagOdometry; /* An odometry class which returns the position of the robot using the method specified*/
+  std::queue<pathplanner::PathPlannerTrajectory> trajectoryList; /* A list of all trajectories to be run in an auton*/
+  pathplanner::PathPlannerTrajectory trajectory; /* The curent trajectory*/
 
-  // All Variables below are "WIP" for testing and will hopefully be refactored later
-  Pose2d visionPose;
-  double timeSinceOdometryRefresh;
-  bool seeTag = false;
+  bool isRedAlliance = true; 
 
-  double lastX = 0; /* The last speed in the X direction */
+  //Variables for PID
+  double lastX = 0; /* The speed of the Swerve in the X direction last update loop*/
   double lastY = 0;
   double lastSpin = 0;
 
@@ -279,9 +282,8 @@ private:
   double runningIntegralY = 0;
   double runningIntegralSpin = 0;
 
-  bool isRedAlliance = true;
-
-  double lastGyroRot = 0;
+  //Variables for Balancing
+  double lastGyroRot = 0; 
   double lastGyroVel = 0;
   int currentBalanceDrivingDirection = 1;
   int balanceFacingDirection = 1;
@@ -414,7 +416,7 @@ public:
   }
 
   /**
-   * Resets Odometry to a position
+   * Resets Odometry to a given position
    */
   void ResetOdometry(Pose2d position)
   {
@@ -435,7 +437,7 @@ public:
   }
 
   /**
-   * Resets Odometry to (0,0) facing away from the driver
+   * Resets Cone Odometry to (0,0) facing away from the driver
    */
   void ResetConeOdometry()
   {
@@ -443,7 +445,7 @@ public:
   }
 
   /**
-   * Resets Odometry to a position
+   * Resets Cone Odometry to a given position
    */
   void ResetConeOdometry(Pose2d position)
   {
@@ -458,13 +460,16 @@ public:
         frc::Pose2d(Pose2d(position.Y(), position.X(), Rotation2d(0_rad))));
   }
 
+  /**
+   * Resets Tag Odometry to (0,0) facing away from the driver
+   */
   void ResetTagOdometry()
   {
     ResetTagOdometry(Pose2d(0_m, 0_m, Rotation2d(0_rad)));
   }
 
   /**
-   * Resets Odometry to a position
+   * Resets Tag Odometry to a given position
    */
   void ResetTagOdometry(Pose2d position)
   {
@@ -496,6 +501,13 @@ public:
     odometry->Update(units::radian_t{GetIMURadians()}, positions);
   }
 
+  /**
+   * Updates the cone odometry reading based on change in each swerve module's positions.
+   * Must be called every periodic loop for accuracy (once every 20ms or less)
+   * Only of use if we are going towards a cone and it is temporaly out of vision, this function can be used to "remember" the position of the cone and drive to it using odoemtry.
+   *
+   * @param currentTime The current FPGA time of the robot.
+   */
   void UpdateConeOdometry()
   {
     wpi::array<SwerveModulePosition, 4> positions = {FLModule->GetSwerveModulePosition(),
@@ -505,6 +517,13 @@ public:
     coneOdometry->Update(units::radian_t{0_rad}, positions);
   }
 
+  /**
+   * Updates the tag odometry reading based on change in each swerve module's positions.
+   * Must be called every periodic loop for accuracy (once every 20ms or less)
+   * Only of use if we are going towards a tag and it is temporaly out of vision, this function can be used to "remember" the position of the tag and drive to it using odoemtry.
+   *
+   * @param currentTime The current FPGA time of the robot.
+   */
   void UpdateTagOdometry()
   {
     wpi::array<SwerveModulePosition, 4> positions = {FLModule->GetSwerveModulePosition(),
@@ -515,8 +534,8 @@ public:
   }
 
 
-  //Suggestion: For functions without a body, you might want to throw an exception when you run them, so that you don't have silent failure if you use one by accident
   /**
+   * THIS FUNCTION IS NOT IN USE
    * Updates the Estimated Position of the robot with an estimate from non-odometry sensors, usually using vision and april-tags
    *
    * @param poseEstimate The translation estimated by the sensor
@@ -531,6 +550,7 @@ public:
   }
 
   /**
+   * THIS FUNCTION IS NOT IN USE
    * Updates the Estimated Position of the robot with an estimate from non-odometry sensors, usually using vision and april-tags
    *
    * @param poseEstimate The pose estimated by the sensor
@@ -544,7 +564,7 @@ public:
   }
 
   /**
-   * Finds the Pose of the robot using a kalman filter estimation of odometry and all cameras viewed by the april tag
+   * Finds the Pose of the robot using odometry 
    * The math is complicated and WPI does it for me so I don't completely understand it, but if you have questions you can check their documentation or ask me
    */
   Pose2d GetPose()
@@ -577,6 +597,13 @@ public:
     BLModule->DriveSwerveModuleMeters(states[3].speed.value(), states[3].angle.Degrees().value());
   }
 
+  /**
+   * Drives the swerve "robot oriented" meaning the FWD drive speed will move the robot in the direction of the front of the robot
+   *
+   * @param STRAFE_Drive_Speed The speed the robot should move left and right, positive being right, in percentage (0 - 1.0)
+   * @param FWD_Drive_Speed The speed the robot should move forward and back, positive being forward, in percentage (0 - 1.0)
+   * @param Turn_Speed The speed the robot should turn left and right, positive being clockwise, in percentage (0 - 1.0)
+   */
   void DriveSwervePercentNonFieldOriented(double STRAFE_Drive_Speed, double FWD_Drive_Speed, double Turn_Speed)
   {
 
@@ -670,7 +697,8 @@ public:
   }
 
   /**
-   * Resets all errors and PID things to 0 to get ready for the PID loop in drive to pose
+   * Resets all errors and PID values to 0 to get ready for the PID loop
+   * Needs to be called before most autonomous functions or the function will begin with a 
    */
   void BeginPIDLoop()
   {
@@ -678,10 +706,12 @@ public:
     lastY = 0;
     lastSpin = 0;
     runningIntegralX = 0;
+    runningIntegralY = 0;
+    runningIntegralSpin = 0;
   }
 
   /**
-   * Drives the robot to a pose using a feedback PID loop
+   * Drives the robot to a pose using a feedback PID loop. Ths PID Values in Question are defined in swerveconstants.h file
    * @param target the target Pose
    * @param elapsedTime the time since our last iteration of the pid loop
    */
@@ -692,6 +722,12 @@ public:
                        O_SPIN_KP, O_SPIN_KI, O_SPIN_KI_MAX, false);
   }
 
+
+  /**
+   * Drives the robot to a pose using a feedback PID loop in relation to an april tag. Ths PID Values in Question are defined in swerveconstants.h file
+   * @param target the target Pose
+   * @param elapsedTime the time since our last iteration of the pid loop
+   */
   bool DriveToPoseTag(Pose2d target, double elapsedTime)
   {
     return DriveToPose(Pose2d(GetTagOdometryPose().Translation(), GetPose().Rotation()), target, elapsedTime, A_TRANSLATION_MAX_SPEED, A_TRANSLATION_MAX_ACCEL, A_ALLOWABLE_ERROR_TRANSLATION,
@@ -699,7 +735,11 @@ public:
                        O_SPIN_KP, O_SPIN_KI, O_SPIN_KI_MAX, false);
   }
 
-
+  /**
+   * Drives the robot to a pose using a feedback PID loop in relation to a cone.
+   * @param target the target Pose
+   * @param elapsedTime the time since our last iteration of the pid loop
+   */
   bool DriveToPoseConeOdometry(Pose2d target, double elapsedTime)
   {
     Pose2d current = GetConeOdometryPose();
@@ -888,8 +928,8 @@ public:
      SmartDashboard::PutNumber("XDistance", xDistance);
      SmartDashboard::PutNumber("YDistance", yDistance);
      SmartDashboard::PutNumber("ThetaDistance", thetaDistance);
-// SmartDashboard::PutNumber("Theta I", intendedI);
-// SmartDashboard::PutNumber("Intended Vel", intendedVelocity);
+    // SmartDashboard::PutNumber("Theta I", intendedI);
+    // SmartDashboard::PutNumber("Intended Vel", intendedVelocity);
 
     // SmartDashboard::PutNumber("Drive X", lastX);
     // SmartDashboard::PutNumber("Drive Y", lastY);
@@ -927,6 +967,8 @@ public:
     return lastSpin;
   }
 
+  // Reset trajectory list.
+  // For use at beginning of autonomous to make sure we have not loaded any extra trajectories
   void ResetTrajectoryList()
   {
     while (trajectoryList.empty() == false)
@@ -1127,13 +1169,14 @@ public:
   }
 
   /**
-   * Turns the robot to pid a value to 0, i.e. for limelight
+   * Moves the robot to PID a given limelight target to a given point, essentially putting the robot in a certain position relative to the limelight target.
+   * 
    * @param offset The position of the limelight, from -1 to 1 with -1 meaning turn counterclockwise
    * @param elapsedTime time since function last called
    */
   bool StrafeToPole(double offsetX, double offsetY, double xGoal, double yGoal, double elapsedTime)
   {
-    // TODO fix this because it sucks
+    // PIDs the robot to face 180 degrees, because that is the direction you want to be when placing game objects.
     Pose2d thetaGoal = Pose2d(0_m, 0_m, Rotation2d(180_deg));
     double thetaDistance = thetaGoal.RelativeTo(GetPose()).Rotation().Radians().value();
     if (fabs(thetaDistance) < O_ALLOWABLE_ERROR_ROTATION)
@@ -1148,12 +1191,7 @@ public:
                            O_SPIN_MAX_ACCEL * elapsedTime);
     runningIntegralSpin += thetaDistance;
 
-//  SmartDashboard::PutNumber("ThetaDistance", thetaDistance);
-// SmartDashboard::PutNumber("Theta I", intendedI);
-// SmartDashboard::PutNumber("Intended Vel", intendedVelocity);
-     SmartDashboard::PutNumber("Drive Spin", lastSpin);
-
-    // Use PID  to determine our desired spin speed
+    // Use PID  to determine our desired X speed
     offsetX -= xGoal;
     if (fabs(offsetX) < P_ALLOWABLE_ERROR_STRAFE)
     {
@@ -1168,13 +1206,12 @@ public:
                         P_STRAFE_MAX_ACCEL * elapsedTime);
     runningIntegralX += offsetX;
 
-  SmartDashboard::PutNumber("XDistance", offsetX);
-  SmartDashboard::PutNumber("X I", intendedI);
-  SmartDashboard::PutNumber("Intended Vel", intendedVelocity);
-     SmartDashboard::PutNumber("Drive X", lastX);
+    SmartDashboard::PutNumber("XDistance", offsetX);
+    SmartDashboard::PutNumber("X I", intendedI);
+    SmartDashboard::PutNumber("Intended Vel", intendedVelocity);
+    SmartDashboard::PutNumber("Drive X", lastX);
      
     offsetY -= yGoal;
-    SmartDashboard::PutNumber("Real offsetu", offsetY);
     if (fabs(offsetY) < P_ALLOWABLE_ERROR_TRANS)
     {
       lastY = 0;
@@ -1190,21 +1227,15 @@ public:
 
     DriveSwervePercent(-lastX, lastY, lastSpin);
 
-
-  SmartDashboard::PutNumber("YDistance", offsetY);
-  SmartDashboard::PutNumber("Y I", intendedI);
- SmartDashboard::PutNumber("Intended Vel", intendedVelocity);
-     SmartDashboard::PutNumber("Drive Y", lastY);
     return (lastX == 0 && lastY == 0 && lastSpin == 0);
   }
 
 
-  //Suggestion: As far as I can tell, this function is only called once (Robot.cpp, AutonomousPeriodic, if (m_autoSelected == kAutoBLCubeCone || m_autoSelected == kAutoBRCubeCone || m_autoSelected == kAutoRRCubeCone || m_autoSelected == kAutoRLCubeCone), if(splineSection == 2.5), if (turnt && elevatorLift->winchEncoderReading() > 40)).
-  //There are two differences between StrafeToPole and StrafeToPole2:
-  //StrafeToPole2 uses 0.03 instead of P_STRAFE_KI(0.04) when calculating intendedI the second time
-  //StrafeToPole2 uses 0.4 instead of P_STRAFE_KP(0.6) when calculating intendedVelocity the second time
-  //I am not sure why these values need to be different in the one case where you call this function, but it might be smart to refactor the logic so that there is only one StrafeToPole function
-  bool StrafeToPole2(double offsetX, double offsetY, double xGoal, double yGoal, double elapsedTime)
+  /**
+   * This function is a faster version of "StrafeToPole" and is not completely tuned. 
+   * It is only used in a prototype 3 game object autonomous.
+  */
+  bool StrafeToPoleFast(double offsetX, double offsetY, double xGoal, double yGoal, double elapsedTime)
   {
     // TODO fix this because it sucks
     Pose2d thetaGoal = Pose2d(0_m, 0_m, Rotation2d(180_deg));
@@ -1281,6 +1312,9 @@ public:
 
 
 
+  /**
+   * Prepares robot to balance on the platform. Call this function directly before starting to balance.
+  */
   void StartBalance()
   {
     //determine which of the two possible directions we are facing, fwds or backwards
@@ -1298,11 +1332,18 @@ public:
     lastY = 0;
   }
 
+  /**
+   * Returns the roll of the robot from the pigeon IMU
+  */
   double GetIMURoll()
   {
     return pigeonIMU->GetRoll();
   }
 
+
+  /**
+   * Balances the robot on the charging station
+  */
   bool BalanceOnCharger(double elapsedTime){
     // positive gyroRot means far side of platform is up, I multiply by balance facing direction to rotate the roll to field oriented
     float gyroRot = pigeonIMU->GetRoll() * balanceFacingDirection;
@@ -1364,6 +1405,9 @@ public:
     return (fabs(gyroRot) < 3 && fabs(gyroVel) < 5 && lastY == 0); // Returns true if done 
   }
 
+  /**
+   * Lock all wheels to face 90 degrees, essentially braking us on the platform.
+  */
   void StrafeLock()
   {
     FLModule->DriveSwerveModulePercent(0, 90);
@@ -1371,25 +1415,4 @@ public:
     BLModule->DriveSwerveModulePercent(0, 90);
     BRModule->DriveSwerveModulePercent(0, 90);
   }
-/*    float pitch = pigeonIMU->GetPitch();
-    frc::SmartDashboard::PutNumber("gyroRot", gyroRot); //on the dashboard, output the gyroRot number
-
-    float deadZone = 2.5;                           //deadzone angle
-    float slowDownDeadZone = 13;
-    float slowP = 0.2 * 1 / 9;
-    float fastP = 0.9 * 1 / 9;
-    float hardMotorCap =  0.4;
-    float motorVelocity = 0;                            //final velocity of motor
-    int direction = (gyroRot > 0) ? 1 : -1;         // if gyroRot is greater than 0, change direction to -1, vice versa. This is for correction, we want to move opposite direction from tilt
-
-    if (abs(gyroRot) > slowDownDeadZone)
-        motorVelocity = direction * abs(gyroRot) * motorSpeedBigDamp; //when rotation of gyro exceeds the deadzone, set motor velocity (this is proportional to the gyro angle)
-    else if (abs(gyroRot) > deadZone)
-        motorVelocity = direction * abs(gyroRot) * motorSpeedDamp;
-    if (motorVelocity > hardMotorCap)   //if motorVelocity exceeds the hard cap, make the motor velocity equal the hard cap
-        motorVelocity = hardMotorCap;
-    if (motorVelocity < -hardMotorCap)  //same in negative direction
-        motorVelocity = -hardMotorCap;*/
-    
-    //Added a negative sign below because the robot will be facing backwards     -Avrick
 };
