@@ -4,16 +4,11 @@
 
 #include "Setup.h"
 
-#include "Swerve.cpp"
-#include "Elevator.cpp"
-#include "Limelight.cpp"
-#include "Claw.cpp"
-#include "LEDLights.cpp"
-
-#include <fmt/core.h>
-#include <frc/livewindow/LiveWindow.h>
-
-#include <frc/smartdashboard/SmartDashboard.h>
+#include "Swerve.h"
+#include "Elevator.h"
+#include "Limelight.h"
+#include "Claw.h"
+#include "LEDLights.h"
 
 double pigeon_initial;
 // Our future subsystem objects
